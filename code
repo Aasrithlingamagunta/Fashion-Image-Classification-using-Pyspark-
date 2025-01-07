@@ -1,0 +1,195 @@
+import findspark
+
+findspark.init()
+print('Spark found')
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, regexp_extract
+from pyspark.ml.evaluation import MulticlassClassificationEvaluator
+from pyspark.ml.classification import MultilayerPerceptronClassifier
+from pyspark.ml.functions import array_to_vector
+from pyspark.sql.types import ArrayType, IntegerType, DoubleType
+from pyspark.ml.feature import VectorAssembler
+from pyspark.sql.functions import udf
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+cores=4
+# Initialize SparkSession
+spark = SparkSession.builder \
+    .appName("ImageProcessing") \
+    .config("spark.driver.memory", "5g") \
+    .config("spark.executor.memory", "7g") \
+    .config("spark.executor.cores", cores) \
+    .getOrCreate()
+print('Spark session started')
+
+# Path to the directory containing images
+image_dir = r"D:\Pictures\fashion_dataset\fashion-dataset\images_resized2"
+
+# Read images as DataFrame
+image_df = spark.read.format("image").load(image_dir)
+print('Images loaded')
+image_df=image_df.dropna()
+image_df.printSchema()
+#image_df = image_df.limit(10000)
+#print('Count:', image_df.count())
+print('Showing PySpark DataFrame\n')
+
+# Extract ID from image origin
+id_pattern = r'/([0-9]+)\.jpg'
+image_df = image_df.withColumn("id", regexp_extract("image.origin", id_pattern, 1))
+image_df.select("image.origin", "image.height", "image.width", 'id').show()
+
+# Read styles.csv file
+file = "D:\\Pictures\\fashion_dataset\\fashion-dataset\\styles.csv"
+data_df = spark.read.option("header", "True").csv(file)
+data_df=data_df.dropna()
+data_df.show()
+
+# Join DataFrames
+print('Joining DataFrames')
+joined_df = image_df.join(data_df, on="id", how="inner")
+print('DataFrames joined')
+
+print('Starting Repartition')
+joined_df=joined_df.repartition(cores)
+print('Repartition done')
+
+print('Caching dataframe')
+joined_df.cache()
+
+# Print some information to trigger caching (optional)
+print('Caching done')
+
+#print('showing joined dataframe\n')
+# joined_df.select('image.origin', 'image.height', 'id', 'season').show()
+#from pyspark.sql.functions import spark_partition_id
+
+# Assuming df is your DataFrame
+#joined_df.withColumn("partitionId",spark_partition_id()).groupBy("partitionId").count().show()
+
+
+print('starting indexing')
+# Define a function to map season values to labels
+def string_indexer(season):
+    season_labels = {"Spring": 0.0, "Summer": 1.0, "Fall": 2.0, "Winter": 3.0}  # Define mapping
+
+    return season_labels[season]
+
+
+# Convert the function to a UDF
+string_indexer_udf = udf(string_indexer, DoubleType())
+
+# Apply the UDF to the DataFrame
+joined_df = joined_df.withColumn("label", string_indexer_udf(joined_df["season"]))
+print('indexing finished')
+# Define evaluator for model evaluation
+
+# Define a UDF to extract image data as bytearray
+
+
+
+
+# Define a UDF to convert array of integers to Dense Vector
+
+
+# Register the UDF
+
+
+# Convert the image_data column to Dense Vector
+
+def extract_image_data(image):
+    return list(image)
+
+
+extract_image_data_udf = udf(extract_image_data, ArrayType(IntegerType()))
+
+# Add a new column with the image data
+print("Extracting image data...")
+joined_df = joined_df.withColumn("image_data", extract_image_data_udf(joined_df["image.data"]))
+joined_df = joined_df.withColumn("image_data", array_to_vector(joined_df["image_data"]))
+
+# Select only the necessary columns
+# print("Selecting necessary columns for classification...")
+# data_for_classification = joined_df.select("image_data", "label")
+
+
+# Assemble features
+print("Assembling features...")
+assembler = VectorAssembler(inputCols=["image_data"], outputCol="features")
+joined_df = assembler.transform(joined_df)
+
+# Select only the necessary columns
+print("Selecting necessary columns for classification...")
+data_for_classification = joined_df.select("features", "label")
+
+# Split data into training and testing sets
+print("Splitting data into training and testing sets...")
+training_data, testing_data = data_for_classification.randomSplit([0.8, 0.2], seed=42)
+
+# Define the number of classes
+print("Determining the number of classes...")
+# num_classes = data_for_classification.select("label").distinct().count()
+num_classes = 4
+print("Number of classes:", num_classes)
+
+
+
+from pyspark.mllib.evaluation import MulticlassMetrics
+
+# Define and train the classifier
+print("Defining and training the classifier...")
+layers = [2400, 100, num_classes]  # input layer of size equal to the size of the image data, intermediate layer of size 4, and output of size num_classes
+perceptron = MultilayerPerceptronClassifier(maxIter=1000, layers=layers, blockSize=128, seed=1234)
+
+print('Training data')
+perceptron_model = perceptron.fit(training_data)
+print('Training complete')
+
+# Evaluate the model
+print('Evaluating Model')
+test_pred = perceptron_model.transform(testing_data)
+evaluator = MulticlassClassificationEvaluator(predictionCol="prediction", labelCol="label", metricName="accuracy")
+
+# Evaluate accuracy
+accuracy = evaluator.evaluate(test_pred)
+
+# Print the accuracy
+print("Accuracy:", accuracy)
+
+# Extracting predictions and labels
+predictionAndLabels = test_pred.select("prediction", "label")
+
+
+metrics = MulticlassMetrics(predictionAndLabels.rdd)
+confusion_matrix = metrics.confusionMatrix().toArray()
+
+
+# Assuming confusion_matrix is a numpy array or a list of lists
+# Here, I'm assuming you're using seaborn and matplotlib for visualization
+
+# Printing confusion matrix
+print("Confusion Matrix:")
+print(confusion_matrix)
+
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# Assuming confusion_matrix is your 2D confusion matrix array
+# Convert the confusion matrix to a Pandas DataFrame
+confusion_matrix_df = pd.DataFrame(confusion_matrix, index=range(confusion_matrix.shape[0]), columns=range(confusion_matrix.shape[1]))
+
+# Plot the heatmap using Seaborn
+plt.figure(figsize=(10, 8))
+sns.heatmap(confusion_matrix_df, annot=True, fmt="d", cmap="YlGnBu")
+plt.title("Confusion Matrix")
+plt.xlabel("Predicted Label")
+plt.ylabel("True Label")
+plt.show()
+
+
+# Stop SparkSession
+spark.stop()
+print('Spark session ended')
